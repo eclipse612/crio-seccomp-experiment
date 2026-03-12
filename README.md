@@ -28,10 +28,30 @@ This experiment:
 - `seccomp-test.c` - C program that attempts blocked syscalls
 - `node-shell.yaml` - Privileged pod for accessing node logs
 - `Dockerfile` - (Optional) Build container image
+- `WORKING_SETUP.md` - Complete tested configuration guide
+- `METRICS.md` - Detailed metrics setup instructions
 
 ## Running the Experiment
 
-### Step 1: Deploy the Test Pod
+### Quick Start
+
+See `WORKING_SETUP.md` for the complete, tested configuration.
+
+### Step 1: Configure CRI-O (Required)
+
+The seccomp notifier requires CRI-O configuration. See `METRICS.md` for detailed steps.
+
+Quick version:
+```bash
+# Deploy node-shell
+kubectl apply -f node-shell.yaml
+kubectl wait --for=condition=Ready pod/node-shell --timeout=60s
+
+# Enable metrics and allow annotation (see METRICS.md for full commands)
+# Then restart CRI-O
+```
+
+### Step 2: Deploy the Test Pod
 
 ```bash
 kubectl apply -f pod.yaml
@@ -91,12 +111,19 @@ kubectl exec node-shell -- sh -c "chroot /host journalctl -u crio --since '10 mi
 
 ### Step 5: Check for Seccomp Metrics (if available)
 
-The `crio_containers_seccomp_notifier_count_total` metric tracks blocked syscalls. Access depends on CRI-O configuration:
+The `crio_containers_seccomp_notifier_count_total` metric tracks blocked syscalls:
 
 ```bash
-# From within the node
-kubectl exec node-shell -- sh -c "chroot /host curl -s http://127.0.0.1:9090/metrics | grep seccomp"
+kubectl exec node-shell -- sh -c "chroot /host curl -s http://127.0.0.1:9090/metrics | grep seccomp_notifier"
 ```
+
+Expected output:
+```
+container_runtime_crio_containers_seccomp_notifier_count_total{name="k8s_test_seccomp-test_default_...",syscall="bpf"} 1
+container_runtime_crio_containers_seccomp_notifier_count_total{name="k8s_test_seccomp-test_default_...",syscall="clone3"} 1
+```
+
+**Note**: Requires CRI-O configuration. See `WORKING_SETUP.md` for complete setup.
 
 ## Understanding the Results
 
