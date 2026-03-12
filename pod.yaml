@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: seccomp-test
+  annotations:
+    io.kubernetes.cri-o.seccompNotifierAction: "log"
+spec:
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: test
+    image: gcc:12-bookworm
+    command: ["/bin/sh", "-c"]
+    args:
+      - |
+        cat > /tmp/test.c << 'EOF'
+        #define _GNU_SOURCE
+        #include <stdio.h>
+        #include <unistd.h>
+        #include <sys/syscall.h>
+        #include <errno.h>
+        #include <string.h>
+        int main() {
+            printf("Testing blocked syscalls...\n");
+            printf("\n1. Attempting clone3()...\n");
+            long ret = syscall(435, NULL, 0);
+            printf("   Result: %ld, errno: %d (%s)\n", ret, errno, strerror(errno));
+            printf("\n2. Attempting bpf()...\n");
+            ret = syscall(321, 0, NULL, 0);
+            printf("   Result: %ld, errno: %d (%s)\n", ret, errno, strerror(errno));
+            printf("\n3. Attempting perf_event_open()...\n");
+            ret = syscall(298, NULL, 0, -1, -1, 0);
+            printf("   Result: %ld, errno: %d (%s)\n", ret, errno, strerror(errno));
+            printf("\n4. Attempting userfaultfd()...\n");
+            ret = syscall(323, 0);
+            printf("   Result: %ld, errno: %d (%s)\n", ret, errno, strerror(errno));
+            printf("\nTest complete. Check for EPERM (errno 1) indicating blocked syscalls.\n");
+            sleep(300);
+            return 0;
+        }
+        EOF
+        gcc -o /tmp/test /tmp/test.c && /tmp/test
+    securityContext:
+      allowPrivilegeEscalation: false

@@ -1,0 +1,8 @@
+*.tar
+*.o
+*.out
+seccomp-test
+.DS_Store
+*.swp
+*.swo
+*~
