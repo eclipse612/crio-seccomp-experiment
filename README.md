@@ -1,3 +1,6 @@
+# NOTE! This repository was created by Kiro-CLI and hasn't been reviewed yet!!!
+
+
 # CRI-O Seccomp Notifier Experiment
 
 This repository demonstrates how to use CRI-O's seccomp notifier feature to log blocked syscalls in Kubernetes pods.
