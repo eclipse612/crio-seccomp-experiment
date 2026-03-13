@@ -16,7 +16,7 @@ This guide covers setting up a Kubernetes cluster with CRI-O and enabling the se
 ### Prerequisites
 
 - Linux system (tested on WSL2)
-- Docker or another container/VM driver
+- Docker installed and user added to docker group
 - 2+ CPUs, 2GB+ RAM
 
 ### Install Minikube
@@ -28,6 +28,10 @@ sudo install minikube-linux-amd64 /usr/local/bin/minikube
 
 # Verify installation
 minikube version
+
+# Add user to docker group (if not already done)
+sudo usermod -aG docker $USER
+newgrp docker
 ```
 
 ### Start Minikube with CRI-O
@@ -63,6 +67,20 @@ crio version 1.35.0
 ...
 SeccompEnabled:   true
 ```
+
+---
+
+## Alternative: kind with CRI-O
+
+**Note**: kind with CRI-O requires building custom node images and is more complex than minikube. For this experiment, minikube is recommended.
+
+If you want to use kind with CRI-O, follow the [official CRI-O in kind tutorial](https://github.com/cri-o/cri-o/blob/main/tutorials/crio-in-kind.md). Key points:
+
+- Requires building a custom kind node image with CRI-O pre-installed
+- More complex setup and troubleshooting
+- Useful for CI/CD pipelines where kind is already in use
+
+For most users, **minikube is the simpler choice** for experimenting with CRI-O's seccomp notifier.
 
 ---
 
