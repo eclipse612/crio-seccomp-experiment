@@ -5,17 +5,51 @@
 
 This repository demonstrates how to use CRI-O's seccomp notifier feature to log blocked syscalls in Kubernetes pods.
 
+## Quick Links
+
+- **[SETUP.md](SETUP.md)** - Complete setup from scratch (minikube + CRI-O configuration)
+- **[WORKING_SETUP.md](WORKING_SETUP.md)** - Verified configuration and results
+- **[METRICS.md](METRICS.md)** - Detailed metrics configuration
+- **[QUICKREF.md](QUICKREF.md)** - Quick reference commands
+
 ## Prerequisites
 
-- Minikube with CRI-O runtime
+- Kubernetes cluster with CRI-O runtime (see [SETUP.md](SETUP.md) for installation)
+- CRI-O 1.24+ with seccomp notifier configured
 - kubectl configured
 - Basic understanding of seccomp and syscalls
 
-## Setup Minikube with CRI-O
+## Quick Start
+
+### 1. Setup Cluster (if needed)
+
+If you don't have a cluster with CRI-O configured:
 
 ```bash
+# Install and start minikube with CRI-O
 minikube start --container-runtime=cri-o
 ```
+
+See [SETUP.md](SETUP.md) for complete installation instructions.
+
+### 2. Configure CRI-O
+
+**Required**: Enable metrics and allow the seccomp notifier annotation.
+
+```bash
+# Deploy node-shell for configuration access
+kubectl apply -f node-shell.yaml
+kubectl wait --for=condition=Ready pod/node-shell --timeout=60s
+
+# Configure CRI-O (see SETUP.md for detailed steps)
+# 1. Enable metrics
+# 2. Allow io.kubernetes.cri-o.seccompNotifierAction annotation
+# 3. Restart CRI-O
+```
+
+See [SETUP.md](SETUP.md) for step-by-step configuration commands.
+
+### 3. Run Experiment
 
 ## Experiment Overview
 
@@ -27,32 +61,33 @@ This experiment:
 
 ## Files
 
+- **[SETUP.md](SETUP.md)** - Complete setup guide from scratch
+- **[WORKING_SETUP.md](WORKING_SETUP.md)** - Verified configuration and results  
+- **[METRICS.md](METRICS.md)** - Detailed metrics configuration
+- **[QUICKREF.md](QUICKREF.md)** - Quick reference commands
+- **[DEEP_DIVE.md](DEEP_DIVE.md)** - Technical deep dive
+- **[GITHUB.md](GITHUB.md)** - Publishing instructions
 - `pod.yaml` - Pod manifest with seccomp configuration
 - `seccomp-test.c` - C program that attempts blocked syscalls
-- `node-shell.yaml` - Privileged pod for accessing node logs
+- `node-shell.yaml` - Privileged pod for accessing node
 - `Dockerfile` - (Optional) Build container image
-- `WORKING_SETUP.md` - Complete tested configuration guide
-- `METRICS.md` - Detailed metrics setup instructions
+- `run-experiment.sh` - Automated experiment script
 
 ## Running the Experiment
 
-### Quick Start
+**Important**: CRI-O must be configured before running the experiment. See [SETUP.md](SETUP.md).
 
-See `WORKING_SETUP.md` for the complete, tested configuration.
+### Step 1: Verify CRI-O Configuration
 
-### Step 1: Configure CRI-O (Required)
-
-The seccomp notifier requires CRI-O configuration. See `METRICS.md` for detailed steps.
-
-Quick version:
 ```bash
-# Deploy node-shell
-kubectl apply -f node-shell.yaml
-kubectl wait --for=condition=Ready pod/node-shell --timeout=60s
+# Check metrics endpoint is accessible
+kubectl exec node-shell -- sh -c "chroot /host curl -s http://127.0.0.1:9090/metrics | head -5"
 
-# Enable metrics and allow annotation (see METRICS.md for full commands)
-# Then restart CRI-O
+# Verify annotation is allowed
+kubectl exec node-shell -- sh -c "chroot /host crio config | grep -A 5 'allowed_annotations'"
 ```
+
+If these fail, see [SETUP.md](SETUP.md) for configuration steps.
 
 ### Step 2: Deploy the Test Pod
 
