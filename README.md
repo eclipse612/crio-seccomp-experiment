@@ -108,7 +108,7 @@ kubectl wait --for=condition=Ready pod/seccomp-test --timeout=300s
 View the syscall test output:
 
 ```bash
-kubectl exec seccomp-test -- cat /proc/1/fd/1
+kubectl exec seccomp-test -- cat /tmp/output.txt
 ```
 
 Expected output:
@@ -119,18 +119,18 @@ Testing blocked syscalls...
    Result: -1, errno: 38 (Function not implemented)
 
 2. Attempting bpf()...
-   Result: -1, errno: 1 (Operation not permitted)
+   Result: -1, errno: 38 (Function not implemented)
 
 3. Attempting perf_event_open()...
-   Result: -1, errno: 1 (Operation not permitted)
+   Result: -1, errno: 38 (Function not implemented)
 
 4. Attempting userfaultfd()...
-   Result: -1, errno: 1 (Operation not permitted)
+   Result: -1, errno: 38 (Function not implemented)
 
 Test complete. Check for EPERM (errno 1) indicating blocked syscalls.
 ```
 
-**Note**: `errno 1` (EPERM) indicates the syscall was blocked by seccomp.
+**Note**: All syscalls return errno 38 (ENOSYS - "Function not implemented"). See [RESULTS.md](RESULTS.md) for detailed analysis of why only `clone3` appears in metrics.
 
 ### Step 4: Check CRI-O Logs for Seccomp Events
 
@@ -157,9 +157,10 @@ kubectl exec node-shell -- sh -c "chroot /host curl -s http://127.0.0.1:9090/met
 
 Expected output:
 ```
-container_runtime_crio_containers_seccomp_notifier_count_total{name="k8s_test_seccomp-test_default_...",syscall="bpf"} 1
 container_runtime_crio_containers_seccomp_notifier_count_total{name="k8s_test_seccomp-test_default_...",syscall="clone3"} 1
 ```
+
+**Important**: Only `clone3` appears in the metrics, even though all 4 syscalls were attempted. See [RESULTS.md](RESULTS.md) for a detailed comparison and analysis.
 
 **Note**: Requires CRI-O configuration. See `WORKING_SETUP.md` for complete setup.
 
