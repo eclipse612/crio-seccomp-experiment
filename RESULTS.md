@@ -1,143 +1,196 @@
-# Experiment Results - Syscall Comparison
+# Experiment Results
 
-This document shows the comparison between syscalls attempted by the test program and what CRI-O's seccomp notifier actually tracked, along with an explanation of the observed behaviour.
+This document compares syscalls attempted by the test program against CRI-O's
+seccomp notifier metrics, and explains the observed behaviour based on CRI-O's
+source code.
 
 ## Test Program Output
 
 ```
 Testing blocked syscalls...
 
-1. Attempting clone3()...
-   Result: -1, errno: 38 (Function not implemented)
+=== allowlist (SCMP_ACT_ALLOW -> NOTIFY) ===
+1. clone3 (nr 435): ret=-1, errno=38 (Function not implemented)
 
-2. Attempting bpf()...
-   Result: -1, errno: 38 (Function not implemented)
+=== unconditional deny (SCMP_ACT_ERRNO -> NOTIFY) ===
+2. swapon (nr 167): ret=-1, errno=38 (Function not implemented)
+3. swapoff (nr 168): ret=-1, errno=38 (Function not implemented)
+4. kexec_load (nr 246): ret=-1, errno=38 (Function not implemented)
 
-3. Attempting perf_event_open()...
-   Result: -1, errno: 38 (Function not implemented)
+=== conditional deny (caps-based -> NOTIFY) ===
+5. bpf (nr 321): ret=-1, errno=38 (Function not implemented)
+6. perf_event_open (nr 298): ret=-1, errno=38 (Function not implemented)
 
-4. Attempting userfaultfd()...
-   Result: -1, errno: 38 (Function not implemented)
-
-Test complete. Check for EPERM (errno 1) indicating blocked syscalls.
+=== conditional deny (no caps -> NOTIFY) ===
+7. userfaultfd (nr 323): ret=-1, errno=38 (Function not implemented)
 ```
 
 ## CRI-O Seccomp Notifier Metrics
 
 ```
-container_runtime_crio_containers_seccomp_notifier_count_total{name="k8s_test_seccomp-test_default_...",syscall="clone3"} 1
+container_runtime_crio_containers_seccomp_notifier_count_total{...,syscall="clone3"} 1
 ```
+
+Only `clone3` appears. The other 6 syscalls are absent from the metrics.
 
 ## CRI-O Log
 
-CRI-O explicitly logs this limitation on container creation:
-
 ```
-The seccomp profile default action SCMP_ACT_ERRNO cannot be overridden to SCMP_ACT_NOTIFY,
-which means that syscalls using that default action can't be traced by the notifier
+Injecting seccomp notifier into seccomp profile of container b06ee4...
+The seccomp profile default action SCMP_ACT_ERRNO cannot be overridden to SCMP_ACT_NOTIFY, ...
+Got seccomp notifier message for container ID: b06ee4... (syscall = clone3)
 ```
 
 ## Comparison
 
-| Syscall | Number | errno | Meaning | Tracked by Notifier |
-|---------|--------|-------|---------|---------------------|
-| clone3 | 435 | 38 (ENOSYS) | Intercepted by notifier | ✅ Yes |
-| bpf | 321 | 38 (ENOSYS) | Hit defaultAction | ❌ No |
-| perf_event_open | 298 | 38 (ENOSYS) | Hit defaultAction | ❌ No |
-| userfaultfd | 323 | 38 (ENOSYS) | Hit defaultAction | ❌ No |
+| # | Syscall | Profile Rule | Rewritten to NOTIFY? | Tracked? | errno |
+|---|---------|-------------|---------------------|----------|-------|
+| 1 | clone3 | ALLOW (allowlist) | ✅ Yes | ✅ Yes (first) | 38 (ENOSYS) |
+| 2 | swapon | ERRNO/EPERM (unconditional) | ✅ Yes | ❌ No | 38 (ENOSYS) |
+| 3 | swapoff | ERRNO/EPERM (unconditional) | ✅ Yes | ❌ No | 38 (ENOSYS) |
+| 4 | kexec_load | ERRNO/EPERM (unconditional) | ✅ Yes | ❌ No | 38 (ENOSYS) |
+| 5 | bpf | ERRNO/EPERM (if !CAP_SYS_ADMIN) | ✅ Yes | ❌ No | 38 (ENOSYS) |
+| 6 | perf_event_open | ERRNO/EPERM (if !CAP_SYS_ADMIN) | ✅ Yes | ❌ No | 38 (ENOSYS) |
+| 7 | userfaultfd | ERRNO/EPERM (unconditional) | ✅ Yes | ❌ No | 38 (ENOSYS) |
 
-## Explanation
+## Proof: Reordering Changes Which Syscall Is Tracked
 
-### How the seccomp notifier works
+To confirm the "first syscall only" behaviour, we reordered the test to call
+`swapon` before `clone3`:
 
-When the `io.kubernetes.cri-o.seccompNotifierAction` annotation is set, CRI-O rewrites the seccomp profile before applying it. It replaces explicit `SCMP_ACT_ERRNO` (and `SCMP_ACT_KILL*`) actions in the `syscalls` list with `SCMP_ACT_NOTIFY`. This allows CRI-O to receive a notification from the kernel when those syscalls are attempted, log them, and update metrics.
+```
+container_runtime_crio_containers_seccomp_notifier_count_total{...,syscall="swapon"} 1
+```
 
-However, CRI-O **cannot** replace the profile's `defaultAction`. The kernel's seccomp notify mechanism does not support notification on the default action.
+The metric switched from `clone3` to `swapon` — whichever NOTIFY-intercepted
+syscall fires first is the only one tracked.
 
-### The RuntimeDefault profile structure
+## Root Cause Analysis
 
-The CRI-O RuntimeDefault profile (from `/usr/share/containers/seccomp.json`) has:
+### Step 1: Profile Compilation
 
-```json
-{
-  "defaultAction": "SCMP_ACT_ERRNO",
-  "defaultErrnoRet": 38,
-  "defaultErrno": "ENOSYS"
+CRI-O uses `containers/common` to compile the seccomp JSON profile into a
+kernel-ready BPF filter. During compilation, `includes`/`excludes` conditions
+are evaluated against the container's capabilities:
+
+- **bpf, perf_event_open**: Have `excludes: {caps: ["CAP_SYS_ADMIN"]}` on
+  their ERRNO/EPERM rule. Since the container lacks CAP_SYS_ADMIN, the
+  excludes check passes and the ERRNO rule is **kept** in the compiled profile.
+- **swapon, swapoff, kexec_load, userfaultfd**: Have unconditional ERRNO/EPERM
+  rules — always included.
+- **clone3**: In the explicit allowlist (SCMP_ACT_ALLOW).
+
+All 7 syscalls have explicit rules in the compiled profile.
+
+### Step 2: Notifier Injection
+
+CRI-O's `injectNotifier` function
+([source](https://github.com/cri-o/cri-o/blob/main/internal/config/seccomp/notifier.go))
+iterates all explicit rules and replaces `SCMP_ACT_ERRNO` / `SCMP_ACT_KILL*`
+with `SCMP_ACT_NOTIFY`. It also replaces `SCMP_ACT_ALLOW` with
+`SCMP_ACT_NOTIFY`.
+
+The `defaultAction` (`SCMP_ACT_ERRNO` with `errnoRet: 38`) **cannot** be
+replaced — the kernel's seccomp notify mechanism does not support notification
+on the default action. CRI-O logs this limitation.
+
+After injection, all 7 syscalls have `SCMP_ACT_NOTIFY` as their action.
+
+### Step 3: The First-Syscall-Only Limitation
+
+The notifier's `handler` function in CRI-O processes incoming seccomp
+notifications in a loop, but **breaks after the first syscall**:
+
+```go
+// From notifier.go handler()
+msgChan <- Notification{ctx, containerID, syscall}
+resp := &libseccomp.ScmpNotifResp{
+    ID:    req.ID,
+    Error: int32(unix.ENOSYS),
+    Val:   uint64(0),
+    Flags: 0,
 }
+// ...
+if err = libseccomp.NotifRespond(fd, resp); err != nil { ... }
+// We only catch the first syscall
+break
 ```
 
-The default action returns ENOSYS (errno 38) for any syscall not matched by an explicit rule. This is by design — unknown/new syscalls should return "Function not implemented" rather than "Operation not permitted".
+This is by design. The handler:
+1. Receives the first NOTIFY event (clone3, since it fires first)
+2. Sends it to the metrics channel
+3. Responds with ENOSYS
+4. **Exits the loop**
 
-### Why clone3 is tracked
+After the handler exits, subsequent NOTIFY-intercepted syscalls (swapon,
+swapoff, kexec_load, bpf, perf_event_open, userfaultfd) have no listener on
+the seccomp notification fd. The kernel's default behaviour when a NOTIFY
+action has no listener is to return ENOSYS.
 
-`clone3` is explicitly listed in the profile's **allowlist** (`SCMP_ACT_ALLOW`). When CRI-O injects the notifier, it replaces this `SCMP_ACT_ALLOW` with `SCMP_ACT_NOTIFY`. The notifier intercepts the call, logs it, updates the metric, and returns ENOSYS.
+### Why clone3 Fires First
 
-This is known behaviour: CRI-O has a specific function that returns ENOSYS for `clone3` via the notifier, because `clone3` is used by newer glibc versions and returning ENOSYS causes a graceful fallback to the older `clone` syscall.
+Even though our test program calls clone3 first, that's not the only reason.
+The `gcc` compiler and glibc runtime call `clone3` during process startup
+(glibc uses it for thread creation). CRI-O's notifier catches this startup
+`clone3` call before our test program even begins executing.
 
-### Why bpf, perf_event_open, and userfaultfd are NOT tracked
-
-These syscalls have explicit `SCMP_ACT_ERRNO`/EPERM rules in the profile, but those rules use conditional `includes`/`excludes` based on Linux capabilities:
-
-**bpf and perf_event_open:**
-```json
-{
-  "names": ["bpf", "perf_event_open", ...],
-  "action": "SCMP_ACT_ALLOW",
-  "includes": { "caps": ["CAP_SYS_ADMIN"] }
-},
-{
-  "names": ["bpf", "perf_event_open", ...],
-  "action": "SCMP_ACT_ERRNO",
-  "excludes": { "caps": ["CAP_SYS_ADMIN"] },
-  "errno": "EPERM"
-}
-```
-
-**userfaultfd:**
-```json
-{
-  "names": ["userfaultfd", ...],
-  "action": "SCMP_ACT_ERRNO",
-  "errno": "EPERM"
-}
-```
-
-When CRI-O compiles the profile with the notifier injection, these syscalls end up falling through to the `defaultAction` (ENOSYS) rather than matching their explicit rules. Since the notifier **cannot intercept the defaultAction**, they are not tracked.
-
-The result: all three return errno 38 (ENOSYS) instead of the expected errno 1 (EPERM), and none appear in the seccomp notifier metrics.
-
-### Summary
+### Summary Diagram
 
 ```
-                    ┌──────────────────────────┐
-                    │   Syscall attempted       │
-                    └────────────┬─────────────┘
-                                 │
-                    ┌────────────▼─────────────┐
-                    │  Explicit rule in profile?│
-                    └────┬──────────────┬──────┘
-                         │              │
-                        Yes             No
-                         │              │
-              ┌──────────▼──────┐  ┌───▼────────────────┐
-              │ CRI-O replaces  │  │ Falls through to    │
-              │ with NOTIFY     │  │ defaultAction       │
-              │                 │  │ (ENOSYS, errno 38)  │
-              │ → Tracked ✅    │  │                     │
-              │ → Metric updated│  │ → NOT tracked ❌    │
-              │ → Returns ENOSYS│  │ → No metric         │
-              └─────────────────┘  └─────────────────────┘
+  Seccomp Profile (after CRI-O injection)
+  ┌─────────────────────────────────────────────────┐
+  │ defaultAction: SCMP_ACT_ERRNO (errnoRet=38)     │ ← Cannot be NOTIFY
+  │                                                   │
+  │ Explicit rules (all rewritten to SCMP_ACT_NOTIFY):│
+  │   clone3, swapon, swapoff, kexec_load,           │
+  │   bpf, perf_event_open, userfaultfd              │
+  └──────────────────────┬──────────────────────────┘
+                         │
+                    First NOTIFY event
+                    (clone3 at startup)
+                         │
+                         ▼
+  ┌──────────────────────────────────────────────────┐
+  │ CRI-O handler:                                    │
+  │  1. Receives clone3 notification                  │
+  │  2. Logs it, updates metric                       │
+  │  3. Responds with ENOSYS                          │
+  │  4. break  ← exits the handler loop               │
+  └──────────────────────────────────────────────────┘
+                         │
+              Handler is now gone.
+              No listener on the fd.
+                         │
+                         ▼
+  ┌──────────────────────────────────────────────────┐
+  │ Subsequent NOTIFY syscalls (swapon, bpf, etc.):  │
+  │  → Kernel has no listener → returns ENOSYS        │
+  │  → No metric, no log entry                        │
+  └──────────────────────────────────────────────────┘
 ```
 
 ## Implications
 
-1. **The seccomp notifier only tracks syscalls with explicit rules** in the profile — not those handled by the defaultAction.
+1. **The seccomp notifier tracks exactly one syscall per container** — the
+   first one that triggers a NOTIFY action. This is intentional (`// We only
+   catch the first syscall`).
 
-2. **With the RuntimeDefault profile**, most blocked syscalls fall through to the defaultAction and are invisible to the notifier. Only syscalls in the explicit allowlist (like `clone3`) are tracked.
+2. **All explicit rules are rewritten to NOTIFY**, regardless of whether they
+   were originally ALLOW or ERRNO. The `includes`/`excludes` conditions are
+   evaluated at profile compile time, not by CRI-O's notifier injection.
 
-3. **To track specific syscalls**, you would need a custom seccomp profile with explicit `SCMP_ACT_ERRNO` rules for each syscall you want to monitor, rather than relying on the defaultAction.
+3. **The defaultAction is never tracked**. Any syscall not covered by an
+   explicit rule falls through to `SCMP_ACT_ERRNO` with `errnoRet=38` (ENOSYS)
+   and is invisible to the notifier.
 
-4. **The errno changes** when the notifier is active: syscalls that would normally return EPERM (errno 1) may return ENOSYS (errno 38) instead, because they fall through to the defaultAction rather than matching their conditional rules.
+4. **All NOTIFY-intercepted syscalls return ENOSYS (errno 38)**, not their
+   original errno. The notifier handler hardcodes `unix.ENOSYS` in its
+   response, and after the handler exits, the kernel also returns ENOSYS for
+   unhandled NOTIFY actions.
+
+5. **The metric is useful for detecting which blocked syscall fires first** in
+   a container — typically `clone3` for glibc-based containers, since glibc
+   probes for `clone3` support at startup.
 
 ## Environment
 
@@ -145,5 +198,5 @@ The result: all three return errno 38 (ENOSYS) instead of the expected errno 1 (
 - CRI-O: 1.35.0
 - Runtime: crun 1.25.1
 - Kernel: 6.6.87.2-microsoft-standard-WSL2
-- Seccomp Profile: RuntimeDefault
+- Seccomp Profile: RuntimeDefault (`/usr/share/containers/seccomp.json`)
 - Date: 2026-03-15
